@@ -1,0 +1,192 @@
+---
+title: "LFS Heatmap"
+output: html_document
+date: "2025-11-03"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+# ---- Packages ----
+library(haven)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(scales)
+library(RColorBrewer)
+library(stringr)
+library(grid)      
+# Load margins output from Stata
+
+pp <- read_dta("D:\\Downloads\\RA work\\pp_all.dta")
+
+# Set facet order (top-left -> bottom-right)
+outcome_order <- c(
+  "Laid off",
+  "School",
+  "Personal/family responsibilities",
+  "Illness/disability",
+  "Retired",
+  "Other reasons"
+)
+
+# Convert, rename, and set factor orders
+pp_clean <- pp %>%
+  mutate(
+    genderimm      = as_factor(`_m1`),
+    famtype_simple = as_factor(`_m2`),
+    prob           = `_margin`,
+    se             = `_se_margin`,
+    ci_lo          = `_ci_lb`,
+    ci_hi          = `_ci_ub`,
+    outcome = factor(
+      outcome,
+      levels = 0:5,
+      labels = c(
+        "Other reasons",
+        "Illness/disability",
+        "Personal/family responsibilities",
+        "School",
+        "Laid off",
+        "Retired"
+      )
+    ),
+    outcome = factor(outcome, levels = outcome_order, ordered = TRUE)
+  ) %>%
+  select(outcome, genderimm, famtype_simple, prob, se, ci_lo, ci_hi) %>%
+  mutate(
+    genderimm = factor(
+      genderimm,
+      levels = c(
+        "Male non-immigrant", "Female non-immigrant",
+        "Male immigrant", "Female immigrant"
+      ),
+      ordered = TRUE
+    ),
+    famtype_simple = factor(
+      famtype_simple,
+      levels = c("M/CL no kids", "M/CL with kids", "Single no kids", "Single with kids"),
+      ordered = TRUE
+    )
+  )
+
+# Differences vs reference and deciles
+ref_g <- "Male non-immigrant"
+ref_f <- "M/CL no kids"
+
+pp_ref <- pp_clean %>%
+  group_by(outcome) %>%
+  mutate(
+    ref_prob = prob[genderimm == ref_g & famtype_simple == ref_f],
+    ref_se   = se  [genderimm == ref_g & famtype_simple == ref_f],
+    se_diff  = sqrt(se^2 + ref_se^2),
+    diff_pp  = prob - ref_prob,
+    z_diff   = ifelse(se_diff > 0, diff_pp / se_diff, NA_real_),
+    p_diff   = 2 * pnorm(-abs(z_diff)),
+    sig_diff = p_diff < 0.05
+  ) %>%
+  ungroup() %>%
+  mutate(
+    decile = cut(
+      prob,
+      breaks = seq(0, 1, by = 0.1),
+      include.lowest = TRUE,
+      right = FALSE,
+      labels = c(
+        "0–10%", "10–20%", "20–30%", "30–40%", "40–50%",
+        "50–60%", "60–70%", "70–80%", "80–90%", "90–100%"
+      )
+    )
+  )
+
+# Palette & legend settings
+dec_levels <- c(
+  "0–10%", "10–20%", "20–30%", "30–40%", "40–50%",
+  "50–60%", "60–70%", "70–80%", "80–90%", "90–100%"
+)
+
+pp_ref <- pp_ref %>%
+  mutate(
+    decile  = gsub("-", "–", decile, fixed = TRUE),
+    decile  = factor(decile, levels = dec_levels, ordered = TRUE),
+    outcome = factor(outcome, levels = outcome_order, ordered = TRUE)
+  )
+
+ylgnbu_10 <- colorRampPalette(brewer.pal(9, "YlGnBu")[2:9])(10)
+pal <- setNames(ylgnbu_10, dec_levels)
+legend_breaks <- dec_levels[1:7]   # show 0–70% in legend
+
+legend_df <- data.frame(
+  famtype_simple = factor(NA, levels = levels(pp_ref$famtype_simple)),
+  genderimm      = factor(NA, levels = levels(pp_ref$genderimm)),
+  decile         = factor(legend_breaks, levels = dec_levels)
+)
+
+# Heatmap (no title, no caption; with axis labels)
+p <- ggplot() +
+  geom_tile(
+    data = subset(pp_ref, sig_diff == FALSE),
+    aes(famtype_simple, genderimm),
+    fill = "white", color = "white", size = 0.4,
+    show.legend = FALSE
+  ) +
+  geom_tile(
+    data = subset(pp_ref, sig_diff == TRUE),
+    aes(famtype_simple, genderimm, fill = decile),
+    color = "white", size = 0.4
+  ) +
+  geom_text(
+    data = pp_ref,
+    aes(
+      famtype_simple, genderimm,
+      label = scales::percent(prob, accuracy = 0.1),
+      color = sig_diff
+    ),
+    size = 3
+  ) +
+  scale_color_manual(values = c(`TRUE` = "black", `FALSE` = "grey60"), guide = "none") +
+  geom_tile(
+    data = legend_df,
+    aes(famtype_simple, genderimm, fill = decile),
+    alpha = 0, color = NA, inherit.aes = FALSE, show.legend = TRUE
+  ) +
+  facet_wrap(~ outcome, ncol = 3) +
+  scale_fill_manual(
+    values = pal,
+    limits = dec_levels,
+    breaks = legend_breaks,
+    drop = FALSE,
+    na.translate = FALSE,
+    name = "Predicted probability"
+  ) +
+  scale_x_discrete(na.translate = FALSE) +
+  scale_y_discrete(na.translate = FALSE) +
+  guides(fill = guide_legend(override.aes = list(alpha = 1))) +
+  labs(
+    x = "Family structure",
+    y = "Gender and immigrant status"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    strip.text = element_text(face = "bold"),
+    panel.grid = element_blank(),
+    axis.text.x = element_text(angle = 20, hjust = 1),
+    plot.margin = margin(t = 6, r = 12, b = 10, l = 12)
+  )
+
+print(p)
+
+#Save image
+ggsave(
+  filename = "lfsexit.jpeg",   # saves to working directory
+  plot = p,
+  width = 11,
+  height = 6,
+  dpi = 300,
+  bg = "white"
+)
+
+```
+
